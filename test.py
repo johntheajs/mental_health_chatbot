@@ -1,26 +1,56 @@
 import streamlit as st
 import ollama
-import pickle
-import os
+import sqlite3
+import json
 
-CHAT_HISTORY_FILE = "chat_history.pkl"
+CHAT_HISTORY_DB = 'chat_history.db'
 
-# Function to send request to OLLAMA model
+# Database setup
+def create_connection():
+    return sqlite3.connect(CHAT_HISTORY_DB)
+
+def create_table():
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS chat_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_data TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def save_chat(chat_id, chat_data):
+    conn = create_connection()
+    cursor = conn.cursor()
+    if chat_id is None:
+        cursor.execute('INSERT INTO chat_history (chat_data) VALUES (?)', (json.dumps(chat_data),))
+        chat_id = cursor.lastrowid
+    else:
+        cursor.execute('UPDATE chat_history SET chat_data = ? WHERE id = ?', (json.dumps(chat_data), chat_id))
+    conn.commit()
+    conn.close()
+    return chat_id
+
+def load_chats():
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM chat_history')
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def delete_chat(chat_id):
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM chat_history WHERE id = ?', (chat_id,))
+    conn.commit()
+    conn.close()
+
 def send_ollama_request(model, messages):
     response = ollama.chat(model=model, messages=messages)
     return response
-
-# Function to save chat history to a file
-def save_chat_history():
-    with open(CHAT_HISTORY_FILE, 'wb') as file:
-        pickle.dump(st.session_state.all_chats, file)
-
-# Function to load chat history from a file
-def load_chat_history():
-    if os.path.exists(CHAT_HISTORY_FILE):
-        with open(CHAT_HISTORY_FILE, 'rb') as file:
-            return pickle.load(file)
-    return []
 
 def main():
     st.set_page_config(
@@ -58,33 +88,40 @@ def main():
 
     st.title("Cherry Bot")
 
-    # Load chat history from the file
+    # Load chat history from the database
+    if 'chat_id' not in st.session_state:
+        st.session_state.chat_id = None
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
     if 'all_chats' not in st.session_state:
-        st.session_state.all_chats = load_chat_history()
+        st.session_state.all_chats = load_chats()
 
     # Sidebar for creating a new chat and viewing old chats
     with st.sidebar:
         st.header("Options")
         if st.button("Start New Chat"):
             if st.session_state.chat_history:
-                st.session_state.all_chats.append(st.session_state.chat_history)
-                save_chat_history()
+                st.session_state.chat_id = save_chat(st.session_state.chat_id, st.session_state.chat_history)
             st.session_state.chat_history = []
+            st.session_state.chat_id = None
+            st.session_state.all_chats = load_chats()
+            st.experimental_rerun()
 
         if st.session_state.all_chats:
             st.subheader("Previous Chats")
-            for i, chat in enumerate(st.session_state.all_chats):
-                chat_button_label = f"Chat {i + 1}"
+            for chat in st.session_state.all_chats:
+                chat_id, chat_data = chat
+                chat_button_label = f"Chat {chat_id}"
                 col1, col2 = st.columns([4, 1])
                 with col1:
-                    if st.button(chat_button_label, key=f"view_{i}"):
-                        st.session_state.chat_history = chat
+                    if st.button(chat_button_label, key=f"view_{chat_id}"):
+                        st.session_state.chat_id = chat_id
+                        st.session_state.chat_history = json.loads(chat_data)
+                        st.experimental_rerun()
                 with col2:
-                    if st.button("❌", key=f"delete_{i}"):
-                        st.session_state.all_chats.pop(i)
-                        save_chat_history()
+                    if st.button("❌", key=f"delete_{chat_id}"):
+                        delete_chat(chat_id)
+                        st.session_state.all_chats = load_chats()
                         st.experimental_rerun()
 
     # Display the conversation history
@@ -150,7 +187,9 @@ def main():
                 st.markdown(f"<div class='chat-history'>{chat_history_str}</div>", unsafe_allow_html=True)
 
             # Save the updated chat history
-            save_chat_history()
+            st.session_state.chat_id = save_chat(st.session_state.chat_id, st.session_state.chat_history)
+            st.session_state.all_chats = load_chats()
 
 if __name__ == "__main__":
+    create_table()
     main()
